@@ -1,0 +1,106 @@
+#!/usr/bin/python
+
+import os, socket, sys, getopt, subprocess, re, Queue, threading;
+
+local_alien_dir = None
+
+hostname = socket.getfqdn()
+if re.match("alice-.*\.physi\.uni-heidelberg\.de", hostname):
+    local_alien_dir = "/misc/alidata121/"
+    print "running in HD, using: " + local_alien_dir
+elif re.match(".*\.gsi\.de", hostname):
+    local_alien_dir = "/hera/alice/jklein/alien/"
+#    local_alien_dir = "/lustre/alice/jklein/alien/"
+    print "running at GSI, using: " + local_alien_dir
+elif re.match("tpjkl", hostname):
+    local_alien_dir = "/alien"
+    print "running on tpjkl, using: " + local_alien_dir
+elif re.match("pcjkl", hostname):
+    local_alien_dir = "/data"
+    print "running on pcjkl, using: " + local_alien_dir
+else:
+    print "unknown location, aborting"
+    sys.exit(-1)
+
+copy_queue = Queue.Queue()
+
+def alien_find(path, pattern):
+    filelist = []
+    alifind = subprocess.Popen(['alien_find', path, pattern], stdout=subprocess.PIPE)
+    for line in alifind.stdout:
+        if re.match("/.*.zip", line) or re.match("/.*.root", line):
+            filelist.append(line.strip())
+    return filelist
+
+def copy_from_alien(path):
+    destpath = local_alien_dir + path
+    destdir = os.path.dirname(destpath)
+    if not os.path.isdir(destdir):
+        try:
+            print "creating " + destdir
+            os.makedirs(destdir)
+        except:
+            print "failed"
+            return
+    print "copying " + path + " to " + destpath
+    print 'alien_cp' + "alien:/" + path + " " + destpath
+    alicp = subprocess.Popen(['alien_cp', "alien:/" + path, destpath])
+#                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    alicp.wait()
+
+def copier():
+    while True:
+        chunk = copy_queue.get()
+        copy_from_alien(chunk)
+        copy_queue.task_done()
+
+if __name__ == "__main__":
+
+    def usage():
+        print "Usage: " + os.path.basename(sys.argv[0]) + " [options] <path> <pattern>"
+        print "  -d <dir>      local alien directory"
+        sys.exit(-1)
+
+    max_no_files = 10
+    no_files = 0
+
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], "d:")
+    except:
+        usage()
+
+    if len(args) != 2:
+        usage()
+
+    path = args[0]
+    pattern = args[1]
+
+    for o, a in opts:
+        if o == "-d":
+            local_alien_dir = a
+
+    copylist = []
+
+    filelist = alien_find(path, pattern)
+
+    print filelist
+
+    for line in filelist:
+        if no_files >= max_no_files:
+            break
+        if not os.path.exists(local_alien_dir + line):
+            copylist.append(line)
+            copy_queue.put(line)
+            no_files += 1
+        else:
+            print "skipping " + local_alien_dir + line
+
+    for i in range(5):
+        t = threading.Thread(target=copier)
+        t.daemon = True
+        t.start()
+
+    copy_queue.join()
+
+    for line in copylist:
+        copy_from_alien(line)
